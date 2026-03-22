@@ -1,0 +1,9 @@
+#N canvas 265 516 402 108 10;
+#X obj 1 7 udly 12000;
+#X obj 11 17 udly 12000;
+#X obj 21 27 udly 12000;
+#X obj 31 37 udly 12000;
+#X obj 41 47 udly 12000;
+#X obj 51 57 udly 12000;
+#X obj 87 7 udly 12000;
+#X obj 97 17 udly 12000;
