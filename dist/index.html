@@ -165,7 +165,7 @@
             
             //  - nodeId "n_0_39" portletId "0"
             //      * type "msg"
-            //      * position 370 811
+            //      * position 487 707
             
             //  - nodeId "n_0_40" portletId "0"
             //      * type "floatatom"
@@ -174,13 +174,22 @@
             
             //  - nodeId "n_0_45" portletId "0"
             //      * type "floatatom"
-            //      * position 238 175
+            //      * position 564 211
+            //      * label "out_pan"
+            
+            //  - nodeId "n_0_51" portletId "0"
+            //      * type "floatatom"
+            //      * position 249 132
             //      * label "general_distance"
             
-            //  - nodeId "n_0_48" portletId "0"
+            //  - nodeId "n_0_59" portletId "0"
             //      * type "floatatom"
-            //      * position 668 212
-            //      * label "out_pan"
+            //      * position 298 836
+            
+            //  - nodeId "n_0_60" portletId "0"
+            //      * type "floatatom"
+            //      * position 707 157
+            //      * label "general_volume"
             
             //  - nodeId "n_0_17" portletId "0"
             //      * type "send"
@@ -260,7 +269,7 @@
                     console.log('Message received from :\n'
                         + '	* nodeId "n_0_39" portletId "0"\n'
                         + '	* type "msg"\n'
-                        + '	* position 370 811\n'
+                        + '	* position 487 707\n'
                     )
                 }
                 if (nodeId === "n_0_40" && portletId === "0") {
@@ -275,16 +284,31 @@
                     console.log('Message received from :\n'
                         + '	* nodeId "n_0_45" portletId "0"\n'
                         + '	* type "floatatom"\n'
-                        + '	* position 238 175\n'
+                        + '	* position 564 211\n'
+                        + '	* label "out_pan"'
+                    )
+                }
+                if (nodeId === "n_0_51" && portletId === "0") {
+                    console.log('Message received from :\n'
+                        + '	* nodeId "n_0_51" portletId "0"\n'
+                        + '	* type "floatatom"\n'
+                        + '	* position 249 132\n'
                         + '	* label "general_distance"'
                     )
                 }
-                if (nodeId === "n_0_48" && portletId === "0") {
+                if (nodeId === "n_0_59" && portletId === "0") {
                     console.log('Message received from :\n'
-                        + '	* nodeId "n_0_48" portletId "0"\n'
+                        + '	* nodeId "n_0_59" portletId "0"\n'
                         + '	* type "floatatom"\n'
-                        + '	* position 668 212\n'
-                        + '	* label "out_pan"'
+                        + '	* position 298 836\n'
+                    )
+                }
+                if (nodeId === "n_0_60" && portletId === "0") {
+                    console.log('Message received from :\n'
+                        + '	* nodeId "n_0_60" portletId "0"\n'
+                        + '	* type "floatatom"\n'
+                        + '	* position 707 157\n'
+                        + '	* label "general_volume"'
                     )
                 }
                 if (nodeId === "n_0_4" && portletId === "0") {
