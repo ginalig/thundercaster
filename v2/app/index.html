@@ -183,17 +183,18 @@
             <canvas id="map" class="map" aria-label="World thunder map"></canvas>
         </main>
 
-        <script src="./webpd-runtime.js"></script>
+        <script src="./webpd-runtime.js?v=20260624-engine-ready"></script>
         <script>
             const PATCH_URL = './patch_4_voices.wasm'
             const LAND_URL = './land-110m.json'
             const DIRECT_STRIKE_URL = 'https://maps.blitzortung.org/en/GEOjson/strikes_00.json'
             const PROXY_STRIKE_URL = './strikes-proxy'
             const DEFAULT_PORTLET_ID = '0'
-            const MAX_REPLAY_STRIKES = 10000
+            const MAX_REPLAY_STRIKES = 2500
             const POLL_INTERVAL_MS = 60000
             const PREFETCH_REMAINING_STRIKES = 20
             const MIN_QUEUE_PREFETCH_INTERVAL_MS = 10000
+            const WEBPD_ENGINE_READY_DELAY_MS = 4000
             const STRIKE_FADE_MS = 2600
             const EARTH_RADIUS_KM = 6371
             const MIN_GENERAL_DISTANCE = 1
@@ -243,6 +244,8 @@
             let isFetchingStrikes = false
             let startAudioPromise = null
             let lastQueuePrefetchAt = 0
+            let webpdMessagesReady = false
+            let pendingWebPdMessages = []
 
             const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 
@@ -256,11 +259,17 @@
                 statusToggle.textContent = isVisible ? 'Hide debug' : 'Debug'
             }
 
-            const sendMsgToWebPd = (nodeId, message) => {
-                if (!webpdNode || !nodeId) {
-                    return
-                }
+            const syncListenerDataset = () => {
+                canvas.dataset.autoListener = 'false'
+                canvas.dataset.listenerLon = listenerGeo.lon.toFixed(4)
+                canvas.dataset.listenerLat = listenerGeo.lat.toFixed(4)
+            }
 
+            const sleep = (durationMs) => new Promise((resolve) => {
+                window.setTimeout(resolve, durationMs)
+            })
+
+            const postMsgToWebPd = (nodeId, message) => {
                 webpdNode.port.postMessage({
                     type: 'io:messageReceiver',
                     payload: {
@@ -271,10 +280,47 @@
                 })
             }
 
+            const sendMsgToWebPd = (nodeId, message) => {
+                if (!webpdNode || !nodeId) {
+                    return
+                }
+
+                if (!webpdMessagesReady) {
+                    pendingWebPdMessages = pendingWebPdMessages.filter((pendingMessage) => pendingMessage.nodeId !== nodeId)
+                    pendingWebPdMessages.push({ nodeId, message })
+                    canvas.dataset.pendingWebPdMessages = String(pendingWebPdMessages.length)
+                    return
+                }
+
+                postMsgToWebPd(nodeId, message)
+            }
+
             const sendThunderToPatch = (distance, pan) => {
                 sendMsgToWebPd(controlNodeIds.generalDistance, [distance])
                 sendMsgToWebPd(controlNodeIds.outPan, [pan])
                 sendMsgToWebPd(controlNodeIds.play, ['bang'])
+            }
+
+            const flushPendingWebPdMessages = () => {
+                const messages = pendingWebPdMessages
+                pendingWebPdMessages = []
+                canvas.dataset.pendingWebPdMessages = '0'
+                messages.forEach(({ nodeId, message }) => {
+                    postMsgToWebPd(nodeId, message)
+                })
+            }
+
+            const waitForWebPdMessages = async () => {
+                if (webpdMessagesReady) {
+                    return
+                }
+
+                setStatus('Starting audio engine...')
+                canvas.dataset.webpdMessagesReady = 'false'
+                await sleep(WEBPD_ENGINE_READY_DELAY_MS)
+                webpdMessagesReady = true
+                canvas.dataset.webpdMessagesReady = 'true'
+                flushPendingWebPdMessages()
             }
 
             const findNodeIdByLabel = (metadata, targetLabel) => {
@@ -331,14 +377,72 @@
                 return response.json()
             }
 
-            const fetchStrikeJson = async () => {
+            const strikeProxyUrl = (since = 0) => {
+                const timestamp = Math.max(0, Number(since) || 0)
+                const params = new URLSearchParams({
+                    limit: String(MAX_REPLAY_STRIKES),
+                })
+                if (timestamp > 0) {
+                    params.set('since', String(timestamp))
+                }
+                return `${PROXY_STRIKE_URL}?${params.toString()}`
+            }
+
+            const normalizeStrikePayload = (payload, mode) => {
+                if (Array.isArray(payload)) {
+                    return {
+                        data: payload,
+                        total: payload.length,
+                        matched: payload.length,
+                        returned: payload.length,
+                        latestTimestamp: 0,
+                        filtered: false,
+                        mode,
+                    }
+                }
+
+                const data = Array.isArray(payload?.strikes) ? payload.strikes : []
+                const total = Number(payload?.total)
+                const latestTimestamp = Number(payload?.latestTimestamp)
+                const matched = Number(payload?.matched)
+                const returned = Number(payload?.returned)
+
+                return {
+                    data,
+                    total: Number.isFinite(total) ? total : data.length,
+                    matched: Number.isFinite(matched) ? matched : data.length,
+                    returned: Number.isFinite(returned) ? returned : data.length,
+                    latestTimestamp: Number.isFinite(latestTimestamp) ? latestTimestamp : 0,
+                    filtered: Boolean(payload?.filtered),
+                    mode,
+                }
+            }
+
+            const fetchStrikeJson = async ({ since = 0, preferProxy = false } = {}) => {
+                const fetchProxy = async () => normalizeStrikePayload(await fetchJson(strikeProxyUrl(since)), 'local proxy')
+                const fetchDirect = async () => normalizeStrikePayload(await fetchJson(DIRECT_STRIKE_URL), 'direct')
+
+                if (preferProxy) {
+                    try {
+                        return await fetchProxy()
+                    } catch (proxyError) {
+                        try {
+                            return {
+                                ...await fetchDirect(),
+                                proxyError,
+                            }
+                        } catch (directError) {
+                            throw new Error(`Live strikes blocked. The local proxy is unavailable, and direct Blitzortung fetch failed. Proxy: ${proxyError.message}. Direct: ${directError.message}`)
+                        }
+                    }
+                }
+
                 try {
-                    return { data: await fetchJson(DIRECT_STRIKE_URL), mode: 'direct' }
+                    return await fetchDirect()
                 } catch (directError) {
                     try {
                         return {
-                            data: await fetchJson(PROXY_STRIKE_URL),
-                            mode: 'local proxy',
+                            ...await fetchProxy(),
                             directError,
                         }
                     } catch (proxyError) {
@@ -892,19 +996,30 @@
                 setStatus(quiet ? 'Refreshing live strikes...' : 'Fetching live strikes...')
 
                 try {
-                    const result = await fetchStrikeJson()
-                    const allStrikes = normalizeStrikes(result.data)
-                    const nextStrikes = onlyNew
-                        ? allStrikes.filter((strike) => strike.timestamp > latestSeenStrikeTimestamp).slice(-MAX_REPLAY_STRIKES)
-                        : allStrikes.slice(-MAX_REPLAY_STRIKES)
+                    const result = await fetchStrikeJson({
+                        since: onlyNew ? latestSeenStrikeTimestamp : 0,
+                        preferProxy: true,
+                    })
+                    const fetchedStrikes = normalizeStrikes(result.data)
+                    const nextStrikes = onlyNew && !result.filtered
+                        ? fetchedStrikes.filter((strike) => strike.timestamp > latestSeenStrikeTimestamp).slice(-MAX_REPLAY_STRIKES)
+                        : fetchedStrikes.slice(-MAX_REPLAY_STRIKES)
 
-                    totalStrikesAvailable = allStrikes.length
-                    lastFetchMode = result.mode
+                    totalStrikesAvailable = result.total
+                    lastFetchMode = result.filtered
+                        ? `${result.mode} delta`
+                        : result.mode
                     lastFetchAt = Date.now()
                     canvas.dataset.lastPollAt = String(lastFetchAt)
+                    canvas.dataset.lastFetchFiltered = String(result.filtered)
+                    canvas.dataset.lastFetchTotal = String(totalStrikesAvailable)
+                    canvas.dataset.lastFetchMatched = String(result.matched)
+                    canvas.dataset.lastFetchReturned = String(result.returned)
 
-                    if (allStrikes.length) {
-                        latestSeenStrikeTimestamp = Math.max(latestSeenStrikeTimestamp, allStrikes.at(-1).timestamp)
+                    if (result.latestTimestamp > 0) {
+                        latestSeenStrikeTimestamp = Math.max(latestSeenStrikeTimestamp, result.latestTimestamp)
+                    } else if (fetchedStrikes.length) {
+                        latestSeenStrikeTimestamp = Math.max(latestSeenStrikeTimestamp, fetchedStrikes.at(-1).timestamp)
                     }
 
                     if (!nextStrikes.length) {
@@ -919,7 +1034,7 @@
                     strikes = onlyNew
                         ? strikes.concat(scheduledStrikes).slice(-MAX_REPLAY_STRIKES)
                         : scheduledStrikes
-                    autoPositionListener(scheduledStrikes)
+                    syncListenerDataset()
                     canvas.dataset.strikesLoaded = String(strikes.length)
                     canvas.dataset.strikesAvailable = String(totalStrikesAvailable)
                     canvas.dataset.lastStrikeBatch = String(scheduledStrikes.length)
@@ -990,6 +1105,7 @@
                 applyVolume()
                 applyRadius()
                 applyDebounce()
+                syncListenerDataset()
                 await loadStrikes()
                 startPolling()
             }
@@ -998,6 +1114,9 @@
                 await resumeAudioContext()
 
                 if (!webpdNode) {
+                    webpdMessagesReady = false
+                    pendingWebPdMessages = []
+                    canvas.dataset.pendingWebPdMessages = '0'
                     webpdNode = await WebPdRuntime.run(
                         audioContext,
                         patch,
@@ -1005,6 +1124,8 @@
                     )
                     webpdNode.connect(audioContext.destination)
                 }
+
+                await waitForWebPdMessages()
 
                 canvas.dataset.audioStarted = 'true'
                 canvas.dataset.audioContextState = audioContext.state
@@ -1071,9 +1192,7 @@
                 const point = getCanvasPoint(event)
                 listenerGeo = unproject(point.x, point.y)
                 hasMovedListener = true
-                canvas.dataset.autoListener = 'false'
-                canvas.dataset.listenerLon = listenerGeo.lon.toFixed(4)
-                canvas.dataset.listenerLat = listenerGeo.lat.toFixed(4)
+                syncListenerDataset()
                 setStatus(`Listener ${listenerGeo.lon.toFixed(1)}, ${listenerGeo.lat.toFixed(1)}; radius ${Math.round(listenerRadiusKm)} km.`)
             })
 
@@ -1092,6 +1211,8 @@
                 audioContextState: audioContext.state,
                 audioStartPending: Boolean(startAudioPromise),
                 audioStartError: canvas.dataset.audioStartError || null,
+                webpdMessagesReady,
+                pendingWebPdMessages: pendingWebPdMessages.length,
                 controls: controlNodeIds,
                 landRings: landRings.length,
                 strikesLoaded: strikes.length,
