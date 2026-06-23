@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="X-UA-Compatible" content="ie=edge">
+        <title>Thundercaster</title>
+        <style>
+            :root {
+                color-scheme: light;
+                --paper: #ffffff;
+                --ink: #111111;
+                --muted: #737373;
+                --faint: #d8d8d8;
+                --listener: #c1121f;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            html,
+            body {
+                margin: 0;
+                min-height: 100%;
+                background: var(--paper);
+            }
+
+            body {
+                min-height: 100vh;
+                padding: 18px;
+                font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                color: var(--ink);
+            }
+
+            .app {
+                width: min(1120px, 100%);
+                margin: 0 auto;
+            }
+
+            .toolbar {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                min-height: 38px;
+                margin: 0 0 12px;
+            }
+
+            button {
+                appearance: none;
+                min-height: 34px;
+                padding: 0 12px;
+                border: 1px solid var(--ink);
+                border-radius: 4px;
+                color: var(--ink);
+                background: var(--paper);
+                font: inherit;
+                font-size: 0.9rem;
+                line-height: 1;
+                cursor: pointer;
+            }
+
+            button:hover:not(:disabled) {
+                background: #f5f5f5;
+            }
+
+            button:disabled {
+                cursor: not-allowed;
+                opacity: 0.45;
+            }
+
+            .status-toggle[aria-expanded="true"] {
+                background: #f5f5f5;
+            }
+
+            .volume,
+            .radius,
+            .debounce {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                color: var(--muted);
+                font-size: 0.84rem;
+            }
+
+            .volume {
+                min-width: 160px;
+            }
+
+            .radius {
+                min-width: 208px;
+            }
+
+            .debounce {
+                min-width: 190px;
+            }
+
+            #volume,
+            #radius,
+            #debounce {
+                width: 96px;
+                accent-color: var(--ink);
+            }
+
+            #volumeValue,
+            #radiusValue,
+            #debounceValue {
+                width: 2.8em;
+                color: var(--ink);
+                font-variant-numeric: tabular-nums;
+            }
+
+            #radiusValue,
+            #debounceValue {
+                width: 4.4em;
+            }
+
+            .status {
+                flex: 1 1 auto;
+                min-width: 160px;
+                margin: 0;
+                color: var(--muted);
+                font-size: 0.84rem;
+                line-height: 1.35;
+                text-align: right;
+            }
+
+            .status[hidden] {
+                display: none;
+            }
+
+            .map {
+                display: block;
+                width: 100%;
+                aspect-ratio: 2 / 1;
+                border: 1px solid var(--ink);
+                background: var(--paper);
+                cursor: crosshair;
+            }
+
+            @media (max-width: 680px) {
+                body {
+                    padding: 10px;
+                }
+
+                .toolbar {
+                    align-items: flex-start;
+                    flex-wrap: wrap;
+                }
+
+                .status {
+                    flex-basis: 100%;
+                    text-align: left;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <main class="app">
+            <header class="toolbar">
+                <button id="start" disabled>Start audio</button>
+                <button id="test" disabled>Test</button>
+                <button id="replay" disabled>Replay</button>
+                <button id="statusToggle" class="status-toggle" aria-expanded="false" aria-controls="status">Debug</button>
+                <label class="volume" for="volume">
+                    <span>vol</span>
+                    <input id="volume" type="range" min="0" max="1" step="0.01" value="0.7">
+                    <span id="volumeValue">0.70</span>
+                </label>
+                <label class="radius" for="radius">
+                    <span>km</span>
+                    <input id="radius" type="range" min="50" max="5000" step="50" value="3000">
+                    <span id="radiusValue">3000</span>
+                </label>
+                <label class="debounce" for="debounce">
+                    <span>gap ms</span>
+                    <input id="debounce" type="range" min="0" max="3000" step="100" value="900">
+                    <span id="debounceValue">900</span>
+                </label>
+                <p id="status" class="status" hidden>Loading patch...</p>
+            </header>
+
+            <canvas id="map" class="map" aria-label="World thunder map"></canvas>
+        </main>
+
+        <script src="./webpd-runtime.js"></script>
+        <script>
+            const PATCH_URL = './patch_4_voices.wasm'
+            const LAND_URL = './land-110m.json'
+            const DIRECT_STRIKE_URL = 'https://maps.blitzortung.org/en/GEOjson/strikes_00.json'
+            const PROXY_STRIKE_URL = './strikes-proxy'
+            const DEFAULT_PORTLET_ID = '0'
+            const MAX_REPLAY_STRIKES = 10000
+            const POLL_INTERVAL_MS = 60000
+            const PREFETCH_REMAINING_STRIKES = 20
+            const MIN_QUEUE_PREFETCH_INTERVAL_MS = 10000
+            const STRIKE_FADE_MS = 2600
+            const EARTH_RADIUS_KM = 6371
+            const MIN_GENERAL_DISTANCE = 1
+            const MAX_GENERAL_DISTANCE = 10000
+            const TAU = Math.PI * 2
+
+            const startButton = document.querySelector('#start')
+            const testButton = document.querySelector('#test')
+            const replayButton = document.querySelector('#replay')
+            const statusToggle = document.querySelector('#statusToggle')
+            const statusDiv = document.querySelector('#status')
+            const canvas = document.querySelector('#map')
+            const volumeSlider = document.querySelector('#volume')
+            const volumeValue = document.querySelector('#volumeValue')
+            const radiusSlider = document.querySelector('#radius')
+            const radiusValue = document.querySelector('#radiusValue')
+            const debounceSlider = document.querySelector('#debounce')
+            const debounceValue = document.querySelector('#debounceValue')
+            const ctx = canvas.getContext('2d')
+            const AudioContextConstructor = window.AudioContext || window.webkitAudioContext
+            const audioContext = new AudioContextConstructor()
+
+            let patch = null
+            let webpdNode = null
+            let controlNodeIds = null
+            let landRings = []
+            let view = { width: 960, height: 480, dpr: 1 }
+            let listenerGeo = { lon: 0, lat: 0 }
+            let listenerRadiusKm = Number(radiusSlider.value)
+            let triggerDebounceMs = Number(debounceSlider.value)
+            let lastSoundTriggerAt = -Infinity
+            let hasMovedListener = false
+            let hasAutoPositionedListener = false
+            let strikes = []
+            let activeStrikes = []
+            let replayTimers = []
+            let replayGeneration = 0
+            let timelineStartTimestamp = null
+            let timelineStartPerformanceTime = 0
+            let pollTimer = null
+            let replayInfo = null
+            let lastFetchMode = ''
+            let lastFetchAt = 0
+            let latestSeenStrikeTimestamp = 0
+            let totalStrikesAvailable = 0
+            let lastThunder = null
+            let isFetchingStrikes = false
+            let startAudioPromise = null
+            let lastQueuePrefetchAt = 0
+
+            const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
+
+            const setStatus = (text) => {
+                statusDiv.textContent = text
+            }
+
+            const setStatusVisible = (isVisible) => {
+                statusDiv.hidden = !isVisible
+                statusToggle.setAttribute('aria-expanded', String(isVisible))
+                statusToggle.textContent = isVisible ? 'Hide debug' : 'Debug'
+            }
+
+            const sendMsgToWebPd = (nodeId, message) => {
+                if (!webpdNode || !nodeId) {
+                    return
+                }
+
+                webpdNode.port.postMessage({
+                    type: 'io:messageReceiver',
+                    payload: {
+                        nodeId,
+                        portletId: DEFAULT_PORTLET_ID,
+                        message,
+                    },
+                })
+            }
+
+            const sendThunderToPatch = (distance, pan) => {
+                sendMsgToWebPd(controlNodeIds.generalDistance, [distance])
+                sendMsgToWebPd(controlNodeIds.outPan, [pan])
+                sendMsgToWebPd(controlNodeIds.play, ['bang'])
+            }
+
+            const findNodeIdByLabel = (metadata, targetLabel) => {
+                const patchNodes = metadata?.customMetadata?.pdNodes || {}
+                for (const patchId of Object.keys(patchNodes)) {
+                    const nodes = patchNodes[patchId]
+                    for (const pdNodeId of Object.keys(nodes)) {
+                        const node = nodes[pdNodeId]
+                        if (node?.layout?.label === targetLabel || node?.label === targetLabel) {
+                            return `n_${patchId}_${pdNodeId}`
+                        }
+                    }
+                }
+                return null
+            }
+
+            const receiveMsgFromWebPd = (nodeId, portletId, message) => {
+                if (portletId !== DEFAULT_PORTLET_ID || !controlNodeIds) {
+                    return
+                }
+
+                const value = message.at(-1)
+                if (nodeId === controlNodeIds.generalVolume && typeof value === 'number' && !Number.isNaN(value)) {
+                    volumeSlider.value = String(value)
+                    volumeValue.textContent = value.toFixed(2)
+                }
+            }
+
+            const applyVolume = () => {
+                const value = Number(volumeSlider.value)
+                volumeValue.textContent = value.toFixed(2)
+                sendMsgToWebPd(controlNodeIds?.generalVolume, [value])
+            }
+
+            const applyRadius = () => {
+                listenerRadiusKm = Number(radiusSlider.value)
+                radiusValue.textContent = Math.round(listenerRadiusKm).toString()
+                canvas.dataset.listenerRadiusKm = String(listenerRadiusKm)
+            }
+
+            const applyDebounce = () => {
+                triggerDebounceMs = Number(debounceSlider.value)
+                debounceValue.textContent = Math.round(triggerDebounceMs).toString()
+                canvas.dataset.triggerDebounceMs = String(triggerDebounceMs)
+            }
+
+            const cacheBust = (url) => `${url}${url.includes('?') ? '&' : '?'}_=${Date.now()}`
+
+            const fetchJson = async (url) => {
+                const response = await fetch(cacheBust(url), { cache: 'no-store' })
+                if (!response.ok) {
+                    throw new Error(`${response.status} ${response.statusText}`.trim())
+                }
+                return response.json()
+            }
+
+            const fetchStrikeJson = async () => {
+                try {
+                    return { data: await fetchJson(DIRECT_STRIKE_URL), mode: 'direct' }
+                } catch (directError) {
+                    try {
+                        return {
+                            data: await fetchJson(PROXY_STRIKE_URL),
+                            mode: 'local proxy',
+                            directError,
+                        }
+                    } catch (proxyError) {
+                        throw new Error(`Live strikes blocked. Blitzortung does not send CORS headers here, and the local proxy is unavailable. Direct: ${directError.message}. Proxy: ${proxyError.message}`)
+                    }
+                }
+            }
+
+            const withTimeout = (promise, timeoutMs, message) => {
+                let timeoutId = 0
+                const timeout = new Promise((_, reject) => {
+                    timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs)
+                })
+
+                return Promise.race([promise, timeout]).finally(() => {
+                    window.clearTimeout(timeoutId)
+                })
+            }
+
+            const resumeAudioContext = async () => {
+                canvas.dataset.audioContextState = audioContext.state
+                if (audioContext.state === 'suspended') {
+                    await withTimeout(
+                        audioContext.resume(),
+                        5000,
+                        'Audio did not unlock. Click Start audio directly in the browser window.',
+                    )
+                }
+
+                canvas.dataset.audioContextState = audioContext.state
+                if (audioContext.state !== 'running') {
+                    throw new Error(`Audio context is ${audioContext.state}. Click Start audio again.`)
+                }
+            }
+
+            const parseTimestamp = (value) => {
+                if (typeof value !== 'string') {
+                    return Date.now()
+                }
+
+                const match = value.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?/)
+                if (!match) {
+                    const parsed = Date.parse(value)
+                    return Number.isNaN(parsed) ? Date.now() : parsed
+                }
+
+                const [, year, month, day, hour, minute, second, fraction = ''] = match
+                const millisecond = Number(fraction.slice(0, 3).padEnd(3, '0'))
+                return Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second), millisecond)
+            }
+
+            const normalizeStrikes = (data) => {
+                if (!Array.isArray(data)) {
+                    return []
+                }
+
+                return data
+                    .map((row) => {
+                        if (!Array.isArray(row)) {
+                            return null
+                        }
+
+                        const lon = Number(row[0])
+                        const lat = Number(row[1])
+                        if (!Number.isFinite(lon) || !Number.isFinite(lat) || lon < -180 || lon > 180 || lat < -90 || lat > 90) {
+                            return null
+                        }
+
+                        return {
+                            lon,
+                            lat,
+                            timestamp: parseTimestamp(row[2]),
+                            label: String(row[2] ?? ''),
+                        }
+                    })
+                    .filter(Boolean)
+                    .sort((a, b) => a.timestamp - b.timestamp)
+            }
+
+            const decodeTopoArc = (topology, arcIndex) => {
+                const shouldReverse = arcIndex < 0
+                const arc = topology.arcs[shouldReverse ? ~arcIndex : arcIndex] || []
+                const scale = topology.transform?.scale || [1, 1]
+                const translate = topology.transform?.translate || [0, 0]
+                let x = 0
+                let y = 0
+
+                const points = arc.map(([dx, dy]) => {
+                    x += dx
+                    y += dy
+                    return [
+                        x * scale[0] + translate[0],
+                        y * scale[1] + translate[1],
+                    ]
+                })
+
+                return shouldReverse ? points.reverse() : points
+            }
+
+            const stitchTopoRing = (topology, ring) => ring.flatMap((arcIndex, index) => {
+                const arc = decodeTopoArc(topology, arcIndex)
+                return index === 0 ? arc : arc.slice(1)
+            })
+
+            const extractGeometryRings = (topology, geometry) => {
+                if (!geometry) {
+                    return []
+                }
+
+                if (geometry.type === 'Polygon') {
+                    return geometry.arcs.map((ring) => stitchTopoRing(topology, ring))
+                }
+
+                if (geometry.type === 'MultiPolygon') {
+                    return geometry.arcs.flatMap((polygon) => polygon.map((ring) => stitchTopoRing(topology, ring)))
+                }
+
+                if (geometry.type === 'GeometryCollection') {
+                    return geometry.geometries.flatMap((childGeometry) => extractGeometryRings(topology, childGeometry))
+                }
+
+                return []
+            }
+
+            const extractLandRings = (topology) => {
+                return extractGeometryRings(topology, topology?.objects?.land)
+            }
+
+            const loadLand = async () => {
+                const topology = await fetchJson(LAND_URL)
+                landRings = extractLandRings(topology)
+                canvas.dataset.landRings = String(landRings.length)
+            }
+
+            const project = (lon, lat) => ({
+                x: ((lon + 180) / 360) * view.width,
+                y: ((90 - lat) / 180) * view.height,
+            })
+
+            const unproject = (x, y) => ({
+                lon: clamp((x / view.width) * 360 - 180, -180, 180),
+                lat: clamp(90 - (y / view.height) * 180, -90, 90),
+            })
+
+            const drawLand = () => {
+                if (!landRings.length) {
+                    return
+                }
+
+                ctx.save()
+                ctx.lineCap = 'butt'
+                ctx.lineJoin = 'miter'
+                ctx.miterLimit = 4
+                ctx.strokeStyle = 'rgba(17, 17, 17, 0.9)'
+                ctx.lineWidth = 1
+
+                landRings.forEach((ring) => {
+                    ctx.beginPath()
+                    let previousPoint = null
+                    ring.forEach(([lon, lat], pointIndex) => {
+                        const point = project(lon, lat)
+
+                        if (pointIndex === 0 || (previousPoint && Math.abs(point.x - previousPoint.x) > view.width * 0.5)) {
+                            ctx.moveTo(point.x, point.y)
+                        } else {
+                            ctx.lineTo(point.x, point.y)
+                        }
+                        previousPoint = point
+                    })
+                    ctx.stroke()
+                })
+
+                ctx.restore()
+            }
+
+            const drawListener = () => {
+                const listener = project(listenerGeo.lon, listenerGeo.lat)
+                ctx.save()
+                ctx.strokeStyle = hasMovedListener ? 'rgba(193, 18, 31, 0.95)' : 'rgba(193, 18, 31, 0.55)'
+                ctx.fillStyle = 'rgba(193, 18, 31, 0.95)'
+                ctx.lineWidth = 1.25
+                ctx.beginPath()
+                ctx.arc(listener.x, listener.y, 4, 0, TAU)
+                ctx.stroke()
+                ctx.beginPath()
+                ctx.moveTo(listener.x - 7, listener.y)
+                ctx.lineTo(listener.x + 7, listener.y)
+                ctx.moveTo(listener.x, listener.y - 7)
+                ctx.lineTo(listener.x, listener.y + 7)
+                ctx.stroke()
+                ctx.restore()
+            }
+
+            const destinationGeo = (origin, bearingDegrees, distanceKm) => {
+                const angularDistance = distanceKm / EARTH_RADIUS_KM
+                const bearing = toRadians(bearingDegrees)
+                const lat1 = toRadians(origin.lat)
+                const lon1 = toRadians(origin.lon)
+                const sinLat1 = Math.sin(lat1)
+                const cosLat1 = Math.cos(lat1)
+                const sinDistance = Math.sin(angularDistance)
+                const cosDistance = Math.cos(angularDistance)
+
+                const lat2 = Math.asin(sinLat1 * cosDistance + cosLat1 * sinDistance * Math.cos(bearing))
+                const lon2 = lon1 + Math.atan2(
+                    Math.sin(bearing) * sinDistance * cosLat1,
+                    cosDistance - sinLat1 * Math.sin(lat2),
+                )
+
+                return {
+                    lon: ((((lon2 * 180 / Math.PI) + 540) % 360) - 180),
+                    lat: clamp(lat2 * 180 / Math.PI, -90, 90),
+                }
+            }
+
+            const drawListenerRadius = () => {
+                ctx.save()
+                ctx.strokeStyle = 'rgba(193, 18, 31, 0.32)'
+                ctx.lineWidth = 1
+                ctx.beginPath()
+
+                let previousPoint = null
+                for (let bearing = 0; bearing <= 360; bearing += 3) {
+                    const geo = destinationGeo(listenerGeo, bearing, listenerRadiusKm)
+                    const point = project(geo.lon, geo.lat)
+
+                    if (bearing === 0 || (previousPoint && Math.abs(point.x - previousPoint.x) > view.width * 0.5)) {
+                        ctx.moveTo(point.x, point.y)
+                    } else {
+                        ctx.lineTo(point.x, point.y)
+                    }
+
+                    previousPoint = point
+                }
+
+                ctx.stroke()
+                ctx.restore()
+            }
+
+            const drawStrikes = (now) => {
+                activeStrikes = activeStrikes.filter((strike) => now - strike.born < STRIKE_FADE_MS)
+
+                activeStrikes.forEach((strike) => {
+                    const age = now - strike.born
+                    const fade = 1 - age / STRIKE_FADE_MS
+                    const radius = 2 + age / 170
+
+                    ctx.save()
+                    ctx.globalAlpha = fade
+                    ctx.strokeStyle = 'rgba(17, 17, 17, 0.9)'
+                    ctx.fillStyle = 'rgba(17, 17, 17, 0.8)'
+                    ctx.lineWidth = 1
+                    ctx.beginPath()
+                    ctx.arc(strike.x, strike.y, radius, 0, TAU)
+                    ctx.stroke()
+                    ctx.beginPath()
+                    ctx.arc(strike.x, strike.y, 1.6, 0, TAU)
+                    ctx.fill()
+                    ctx.restore()
+                })
+            }
+
+            const render = (now = performance.now()) => {
+                ctx.clearRect(0, 0, view.width, view.height)
+                ctx.fillStyle = '#ffffff'
+                ctx.fillRect(0, 0, view.width, view.height)
+                drawLand()
+                drawListenerRadius()
+                drawStrikes(now)
+                drawListener()
+                requestAnimationFrame(render)
+            }
+
+            const resizeCanvas = () => {
+                const rect = canvas.getBoundingClientRect()
+                const dpr = Math.min(window.devicePixelRatio || 1, 2)
+                view = {
+                    width: Math.max(320, rect.width || 960),
+                    height: Math.max(160, rect.height || 480),
+                    dpr,
+                }
+                canvas.width = Math.round(view.width * dpr)
+                canvas.height = Math.round(view.height * dpr)
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+            }
+
+            const toRadians = (degrees) => degrees * (Math.PI / 180)
+
+            const haversineKm = (from, to) => {
+                const lat1 = toRadians(from.lat)
+                const lat2 = toRadians(to.lat)
+                const deltaLat = toRadians(to.lat - from.lat)
+                const deltaLon = toRadians(to.lon - from.lon)
+                const a = Math.sin(deltaLat / 2) ** 2
+                    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLon / 2) ** 2
+
+                return 2 * EARTH_RADIUS_KM * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+            }
+
+            const autoPositionListener = (strikeSet) => {
+                if (hasMovedListener || hasAutoPositionedListener || !strikeSet.length) {
+                    return
+                }
+
+                const candidates = strikeSet.slice(-400)
+                let bestStrike = candidates.at(-1)
+                let bestCount = -1
+
+                candidates.forEach((candidate) => {
+                    let count = 0
+                    candidates.forEach((strike) => {
+                        if (haversineKm(candidate, strike) <= listenerRadiusKm) {
+                            count += 1
+                        }
+                    })
+
+                    if (count > bestCount) {
+                        bestCount = count
+                        bestStrike = candidate
+                    }
+                })
+
+                listenerGeo = { lon: bestStrike.lon, lat: bestStrike.lat }
+                hasAutoPositionedListener = true
+                canvas.dataset.autoListener = 'true'
+                canvas.dataset.listenerLon = listenerGeo.lon.toFixed(4)
+                canvas.dataset.listenerLat = listenerGeo.lat.toFixed(4)
+                canvas.dataset.autoListenerStrikeCount = String(bestCount)
+            }
+
+            const calculatePan = (strikeX, listenerX) => {
+                if (Math.abs(strikeX - listenerX) < 0.001) {
+                    return 0.5
+                }
+
+                if (strikeX < listenerX) {
+                    return listenerX <= 0 ? 0 : clamp(0.5 * (strikeX / listenerX), 0, 0.5)
+                }
+
+                return listenerX >= view.width ? 1 : clamp(0.5 + 0.5 * ((strikeX - listenerX) / (view.width - listenerX)), 0.5, 1)
+            }
+
+            const calculateThunder = (strike, strikePoint) => {
+                const listener = project(listenerGeo.lon, listenerGeo.lat)
+                const distanceKm = haversineKm(listenerGeo, strike)
+                const distanceRatio = clamp(distanceKm / Math.max(listenerRadiusKm, 1), 0, 1)
+
+                return {
+                    distance: Math.round(MIN_GENERAL_DISTANCE + distanceRatio * (MAX_GENERAL_DISTANCE - MIN_GENERAL_DISTANCE)),
+                    distanceKm,
+                    pan: calculatePan(strikePoint.x, listener.x),
+                }
+            }
+
+            const triggerThunder = (strike, strikePoint) => {
+                const thunder = calculateThunder(strike, strikePoint)
+                lastThunder = thunder
+                canvas.dataset.lastDistance = String(thunder.distance)
+                canvas.dataset.lastDistanceKm = thunder.distanceKm.toFixed(1)
+                canvas.dataset.lastPan = thunder.pan.toFixed(6)
+
+                if (thunder.distanceKm > listenerRadiusKm) {
+                    canvas.dataset.skippedOutOfRange = String(Number(canvas.dataset.skippedOutOfRange || '0') + 1)
+                    canvas.dataset.lastSkippedDistanceKm = thunder.distanceKm.toFixed(1)
+                    return 'out'
+                }
+
+                const now = performance.now()
+                const elapsedSinceTrigger = now - lastSoundTriggerAt
+                if (triggerDebounceMs > 0 && elapsedSinceTrigger < triggerDebounceMs) {
+                    canvas.dataset.debouncedTriggerCount = String(Number(canvas.dataset.debouncedTriggerCount || '0') + 1)
+                    canvas.dataset.lastDebouncedGapMs = elapsedSinceTrigger.toFixed(1)
+                    return 'debounced'
+                }
+
+                canvas.dataset.thunderCount = String(Number(canvas.dataset.thunderCount || '0') + 1)
+                lastSoundTriggerAt = now
+
+                sendThunderToPatch(thunder.distance, thunder.pan)
+                return 'played'
+            }
+
+            const testThunder = () => {
+                if (!webpdNode) {
+                    setStatus('Press Start audio first; the browser blocks sound until that click.')
+                    return
+                }
+
+                const distance = MIN_GENERAL_DISTANCE
+                const pan = 0.5
+                canvas.dataset.testThunderCount = String(Number(canvas.dataset.testThunderCount || '0') + 1)
+                canvas.dataset.lastDistance = String(distance)
+                canvas.dataset.lastDistanceKm = '0.0'
+                canvas.dataset.lastPan = pan.toFixed(6)
+                lastThunder = { distance, distanceKm: 0, pan, test: true }
+                sendThunderToPatch(distance, pan)
+                setStatus(`Sent test thunder at distance ${distance}, pan ${pan.toFixed(2)}; live strikes continue by timestamp.`)
+            }
+
+            const updateReplayStatus = () => {
+                if (!replayInfo) {
+                    return
+                }
+
+                const subset = totalStrikesAvailable > replayInfo.count
+                    ? `${replayInfo.count} strikes (${totalStrikesAvailable} fetched)`
+                    : `${replayInfo.count} strikes`
+                const audioError = canvas.dataset.audioStartError
+                const audioState = webpdNode
+                    ? 'audio on'
+                    : (startAudioPromise ? 'starting audio' : (audioError ? `audio off: ${audioError}` : 'press Start audio for sound'))
+                const span = replayInfo.spanMs > 0 ? ` over ${(replayInfo.spanMs / 1000).toFixed(1)}s` : ''
+                const isQueued = !replayInfo.done && replayInfo.played === 0 && replayInfo.firstDelayMs > 1000
+                const state = replayInfo.done ? 'Replay complete' : (isQueued ? 'Queued' : 'Replaying')
+                const startsIn = isQueued ? `, starts in ${(replayInfo.firstDelayMs / 1000).toFixed(1)}s` : ''
+                const soundCounts = webpdNode
+                    ? `; sound ${replayInfo.sounded}, gap ${replayInfo.debounced}, out ${replayInfo.skipped}`
+                    : ''
+                setStatus(`${state} ${replayInfo.played}/${subset}${span}${startsIn} via ${lastFetchMode}; ${audioState}${soundCounts}.`)
+            }
+
+            const requestQueuePrefetch = (runInfo) => {
+                const remaining = runInfo.count - runInfo.played
+                if (runInfo.done || runInfo.prefetchRequested || remaining > PREFETCH_REMAINING_STRIKES || isFetchingStrikes) {
+                    return
+                }
+
+                const now = Date.now()
+                if (now - lastQueuePrefetchAt < MIN_QUEUE_PREFETCH_INTERVAL_MS) {
+                    return
+                }
+
+                runInfo.prefetchRequested = true
+                runInfo.prefetchRemaining = remaining
+                lastQueuePrefetchAt = now
+                canvas.dataset.queuePrefetchRemaining = String(remaining)
+                canvas.dataset.queuePrefetchAt = String(now)
+
+                loadStrikes({ replay: true, onlyNew: true, quiet: true }).then((addedCount) => {
+                    canvas.dataset.queuePrefetchAdded = String(addedCount || 0)
+                    if (!addedCount && replayInfo === runInfo && !runInfo.done) {
+                        runInfo.prefetchRequested = false
+                    }
+                })
+            }
+
+            const clearReplay = () => {
+                replayTimers.forEach((timer) => window.clearTimeout(timer))
+                replayTimers = []
+                replayGeneration += 1
+                timelineStartTimestamp = null
+                timelineStartPerformanceTime = 0
+                lastSoundTriggerAt = -Infinity
+            }
+
+            const scheduleReplay = ({ append = false, strikeBatch = strikes } = {}) => {
+                const scheduledStrikes = strikeBatch.slice()
+                if (!scheduledStrikes.length) {
+                    setStatus('No strike data loaded.')
+                    return
+                }
+
+                if (!append) {
+                    clearReplay()
+                    activeStrikes = []
+                }
+
+                if (timelineStartTimestamp === null) {
+                    timelineStartTimestamp = scheduledStrikes[0].timestamp
+                    timelineStartPerformanceTime = performance.now()
+                }
+
+                const generation = replayGeneration
+                const first = scheduledStrikes[0].timestamp
+                const last = scheduledStrikes.at(-1).timestamp
+                const realSpan = Math.max(0, last - first)
+                const elapsedTimelineMs = performance.now() - timelineStartPerformanceTime
+                const delays = scheduledStrikes.map((strike) => Math.max(0, strike.timestamp - timelineStartTimestamp - elapsedTimelineMs))
+                const maxDelay = Math.max(0, ...delays)
+                const firstDelay = Math.min(...delays)
+
+                const runInfo = {
+                    count: scheduledStrikes.length,
+                    played: 0,
+                    sounded: 0,
+                    debounced: 0,
+                    skipped: 0,
+                    prefetchRequested: false,
+                    done: false,
+                    spanMs: realSpan,
+                    firstDelayMs: firstDelay,
+                    maxScheduledDelayMs: maxDelay,
+                }
+                replayInfo = runInfo
+                canvas.dataset.replaySpanMs = String(Math.round(realSpan))
+                canvas.dataset.maxScheduledDelayMs = String(Math.round(maxDelay))
+                updateReplayStatus()
+
+                scheduledStrikes.forEach((strike, index) => {
+                    const delay = delays[index]
+
+                    const timer = window.setTimeout(() => {
+                        if (generation !== replayGeneration) {
+                            return
+                        }
+
+                        const point = project(strike.lon, strike.lat)
+                        activeStrikes.push({
+                            x: point.x,
+                            y: point.y,
+                            born: performance.now(),
+                        })
+
+                        if (webpdNode) {
+                            const triggerResult = triggerThunder(strike, point)
+                            if (triggerResult === 'played') {
+                                runInfo.sounded += 1
+                            } else if (triggerResult === 'debounced') {
+                                runInfo.debounced += 1
+                            } else {
+                                runInfo.skipped += 1
+                            }
+                        }
+
+                        runInfo.played += 1
+                        requestQueuePrefetch(runInfo)
+                        if (replayInfo === runInfo && (runInfo.played === runInfo.count || runInfo.played % 12 === 0)) {
+                            updateReplayStatus()
+                        }
+                    }, delay)
+
+                    replayTimers.push(timer)
+                })
+
+                replayTimers.push(window.setTimeout(() => {
+                    if (generation !== replayGeneration || replayInfo !== runInfo) {
+                        return
+                    }
+                    runInfo.done = true
+                    updateReplayStatus()
+                }, maxDelay + 120))
+            }
+
+            const loadStrikes = async ({ replay = true, onlyNew = false, quiet = false } = {}) => {
+                if (isFetchingStrikes) {
+                    return 0
+                }
+
+                isFetchingStrikes = true
+                replayButton.disabled = true
+                setStatus(quiet ? 'Refreshing live strikes...' : 'Fetching live strikes...')
+
+                try {
+                    const result = await fetchStrikeJson()
+                    const allStrikes = normalizeStrikes(result.data)
+                    const nextStrikes = onlyNew
+                        ? allStrikes.filter((strike) => strike.timestamp > latestSeenStrikeTimestamp).slice(-MAX_REPLAY_STRIKES)
+                        : allStrikes.slice(-MAX_REPLAY_STRIKES)
+
+                    totalStrikesAvailable = allStrikes.length
+                    lastFetchMode = result.mode
+                    lastFetchAt = Date.now()
+                    canvas.dataset.lastPollAt = String(lastFetchAt)
+
+                    if (allStrikes.length) {
+                        latestSeenStrikeTimestamp = Math.max(latestSeenStrikeTimestamp, allStrikes.at(-1).timestamp)
+                    }
+
+                    if (!nextStrikes.length) {
+                        replayButton.disabled = !strikes.length
+                        const audioState = webpdNode ? 'audio on' : 'press Start audio for sound'
+                        canvas.dataset.lastStrikeBatch = '0'
+                        setStatus(`No new strikes via ${lastFetchMode}; polling every minute; ${audioState}.`)
+                        return 0
+                    }
+
+                    const scheduledStrikes = nextStrikes
+                    strikes = onlyNew
+                        ? strikes.concat(scheduledStrikes).slice(-MAX_REPLAY_STRIKES)
+                        : scheduledStrikes
+                    autoPositionListener(scheduledStrikes)
+                    canvas.dataset.strikesLoaded = String(strikes.length)
+                    canvas.dataset.strikesAvailable = String(totalStrikesAvailable)
+                    canvas.dataset.lastStrikeBatch = String(scheduledStrikes.length)
+
+                    if (!strikes.length) {
+                        setStatus(`No usable strikes in the latest data via ${lastFetchMode}.`)
+                        return 0
+                    }
+
+                    replayButton.disabled = false
+                    setStatus(`Loaded ${scheduledStrikes.length}${totalStrikesAvailable > scheduledStrikes.length ? `/${totalStrikesAvailable}` : ''} strikes via ${lastFetchMode}.`)
+
+                    if (replay) {
+                        scheduleReplay({ append: onlyNew, strikeBatch: scheduledStrikes })
+                    }
+
+                    return scheduledStrikes.length
+                } catch (error) {
+                    console.error(error)
+                    setStatus(error.message)
+                    replayButton.disabled = false
+                    return 0
+                } finally {
+                    isFetchingStrikes = false
+                }
+            }
+
+            const startPolling = () => {
+                window.clearInterval(pollTimer)
+                canvas.dataset.pollIntervalMs = String(POLL_INTERVAL_MS)
+                pollTimer = window.setInterval(() => {
+                    loadStrikes({ replay: true, onlyNew: true, quiet: true }).catch((error) => {
+                        console.error(error)
+                        setStatus(`Could not refresh strikes: ${error.message}`)
+                    })
+                }, POLL_INTERVAL_MS)
+            }
+
+            const initApp = async () => {
+                await WebPdRuntime.initialize(audioContext)
+                await loadLand().catch((error) => {
+                    console.warn('Could not load land outline', error)
+                    canvas.dataset.landError = error.message
+                })
+
+                const response = await fetch(PATCH_URL)
+                if (!response.ok) {
+                    throw new Error(`Could not load ${PATCH_URL}: ${response.status}`)
+                }
+                patch = await response.arrayBuffer()
+
+                const metadata = await WebPdRuntime.readMetadata(patch)
+                controlNodeIds = {
+                    play: findNodeIdByLabel(metadata, 'play'),
+                    generalDistance: findNodeIdByLabel(metadata, 'general_distance'),
+                    outPan: findNodeIdByLabel(metadata, 'out_pan'),
+                    generalVolume: findNodeIdByLabel(metadata, 'general_volume'),
+                }
+
+                if (!controlNodeIds.play || !controlNodeIds.generalDistance || !controlNodeIds.outPan || !controlNodeIds.generalVolume) {
+                    throw new Error('The patch metadata is missing play, general_distance, out_pan, or general_volume.')
+                }
+
+                console.info('Resolved WebPd controls', controlNodeIds)
+                canvas.dataset.webpdControls = 'ready'
+                canvas.dataset.audioStarted = 'false'
+                startButton.disabled = false
+                applyVolume()
+                applyRadius()
+                applyDebounce()
+                await loadStrikes()
+                startPolling()
+            }
+
+            const startApp = async () => {
+                await resumeAudioContext()
+
+                if (!webpdNode) {
+                    webpdNode = await WebPdRuntime.run(
+                        audioContext,
+                        patch,
+                        WebPdRuntime.defaultSettingsForRun(PATCH_URL, receiveMsgFromWebPd),
+                    )
+                    webpdNode.connect(audioContext.destination)
+                }
+
+                canvas.dataset.audioStarted = 'true'
+                canvas.dataset.audioContextState = audioContext.state
+                delete canvas.dataset.audioStartError
+                applyVolume()
+                startButton.disabled = true
+                startButton.textContent = 'Audio running'
+                testButton.disabled = false
+
+                if (strikes.length) {
+                    scheduleReplay()
+                } else {
+                    await loadStrikes()
+                }
+            }
+
+            const requestStartAudio = (event) => {
+                event?.preventDefault()
+                if (webpdNode || startAudioPromise) {
+                    return
+                }
+
+                canvas.dataset.startRequestedAt = String(Date.now())
+                delete canvas.dataset.audioStartError
+                setStatus('Starting audio...')
+                startAudioPromise = startApp().catch((error) => {
+                    console.error(error)
+                    canvas.dataset.audioStartError = error.message
+                    canvas.dataset.audioContextState = audioContext.state
+                    setStatus(`Could not start audio: ${error.message}`)
+                }).finally(() => {
+                    startAudioPromise = null
+                })
+            }
+
+            const getCanvasPoint = (event) => {
+                const rect = canvas.getBoundingClientRect()
+                return {
+                    x: clamp(event.clientX - rect.left, 0, rect.width) * (view.width / rect.width),
+                    y: clamp(event.clientY - rect.top, 0, rect.height) * (view.height / rect.height),
+                }
+            }
+
+            startButton.addEventListener('pointerdown', requestStartAudio)
+            startButton.addEventListener('click', requestStartAudio)
+
+            testButton.addEventListener('click', testThunder)
+            statusToggle.addEventListener('click', () => {
+                setStatusVisible(statusDiv.hidden)
+            })
+
+            replayButton.addEventListener('click', () => {
+                if (!strikes.length || Date.now() - lastFetchAt > 60000) {
+                    loadStrikes().catch((error) => {
+                        console.error(error)
+                        setStatus(`Could not load strikes: ${error.message}`)
+                    })
+                } else {
+                    scheduleReplay()
+                }
+            })
+
+            canvas.addEventListener('click', (event) => {
+                const point = getCanvasPoint(event)
+                listenerGeo = unproject(point.x, point.y)
+                hasMovedListener = true
+                canvas.dataset.autoListener = 'false'
+                canvas.dataset.listenerLon = listenerGeo.lon.toFixed(4)
+                canvas.dataset.listenerLat = listenerGeo.lat.toFixed(4)
+                setStatus(`Listener ${listenerGeo.lon.toFixed(1)}, ${listenerGeo.lat.toFixed(1)}; radius ${Math.round(listenerRadiusKm)} km.`)
+            })
+
+            volumeSlider.addEventListener('input', applyVolume)
+            volumeSlider.addEventListener('change', applyVolume)
+            radiusSlider.addEventListener('input', applyRadius)
+            radiusSlider.addEventListener('change', applyRadius)
+            debounceSlider.addEventListener('input', applyDebounce)
+            debounceSlider.addEventListener('change', applyDebounce)
+            setStatusVisible(false)
+
+            window.__thundercasterDebug = () => ({
+                patchLoaded: Boolean(patch),
+                patchUrl: PATCH_URL,
+                audioStarted: Boolean(webpdNode),
+                audioContextState: audioContext.state,
+                audioStartPending: Boolean(startAudioPromise),
+                audioStartError: canvas.dataset.audioStartError || null,
+                controls: controlNodeIds,
+                landRings: landRings.length,
+                strikesLoaded: strikes.length,
+                totalStrikesAvailable,
+                lastFetchMode,
+                listenerGeo,
+                listenerRadiusKm,
+                triggerDebounceMs,
+                hasAutoPositionedListener,
+                replayInfo,
+                pollIntervalMs: POLL_INTERVAL_MS,
+                prefetchRemainingStrikes: PREFETCH_REMAINING_STRIKES,
+                lastQueuePrefetchAt,
+                latestSeenStrikeTimestamp,
+                timelineStartTimestamp,
+                timelineElapsedMs: timelineStartTimestamp === null ? 0 : performance.now() - timelineStartPerformanceTime,
+                activeStrikes: activeStrikes.length,
+                lastThunder,
+            })
+
+            resizeCanvas()
+            new ResizeObserver(resizeCanvas).observe(canvas)
+            requestAnimationFrame(render)
+
+            initApp().catch((error) => {
+                console.error(error)
+                setStatus(`Initialization failed: ${error.message}`)
+            })
+        </script>
+    </body>
+</html>
